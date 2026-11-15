@@ -1,0 +1,1017 @@
+//@version=6
+indicator("Wyckoff Cycle Pro v3", "WCP v3", overlay = true, max_bars_back = 500, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ==================== INPUTS ====================
+gVol = "Volume"
+volLen = input.int(20, "Volume MA Length", minval = 1, group = gVol)
+climaxRVOL = input.float(2.0, "Climax RVOL", minval = 1.0, step = 0.1, group = gVol)
+sosRVOL = input.float(1.5, "SOS / SOW RVOL", minval = 1.0, step = 0.1, group = gVol)
+dryRVOL = input.float(0.7, "Dry-Up RVOL", maxval = 1.0, step = 0.1, group = gVol)
+
+gRange = "Range and Phases"
+spreadLen = input.int(20, "Average Spread Length", minval = 1, group = gRange)
+wideX = input.float(1.4, "Wide Spread (x avg)", minval = 1.0, step = 0.1, group = gRange)
+narrowX = input.float(0.7, "Narrow Spread (x avg)", maxval = 1.0, step = 0.1, group = gRange)
+pivotLen = input.int(10, "Structure Lookback", minval = 2, group = gRange)
+arMinX = input.float(1.0, "AR Move (x ATR)", minval = 0.2, step = 0.1, group = gRange)
+stTolX = input.float(0.35, "ST Tolerance (x ATR)", minval = 0.05, step = 0.05, group = gRange)
+brkBufX = input.float(0.15, "Breakout Buffer (x ATR)", minval = 0.0, step = 0.05, group = gRange)
+phaseEX = input.float(1.5, "Phase E Distance (x ATR)", minval = 0.2, step = 0.1, group = gRange)
+maxRangeBars = input.int(300, "Max Bars In Range", minval = 20, group = gRange)
+
+gSig = "Signals"
+minScore = input.float(5.0, "Minimum Score (0-10)", minval = 0.0, maxval = 10.0, step = 0.1, group = gSig)
+minCoreEvents = input.int(3, "Minimum Core Events (0-6)", minval = 0, maxval = 6, group = gSig)
+psLookback = input.int(30, "PS / PSY Lookback", minval = 1, group = gSig)
+eventCooldown = input.int(5, "Tier 2/3 Event Cooldown", minval = 1, group = gSig)
+
+gTrade = "Trade Boxes"
+atrLen = input.int(14, "ATR Length", minval = 1, group = gTrade)
+stopATR = input.float(1.5, "Structure SL Buffer (x ATR)", minval = 0.2, step = 0.1, group = gTrade)
+maxStopATR = input.float(4.0, "Max SL Distance (x ATR)", minval = 1.0, step = 0.5, group = gTrade)
+minRR = input.float(1.0, "Minimum RR", minval = 0.1, step = 0.1, group = gTrade)
+maxRR = input.float(5.0, "Maximum RR Before Switching TP", minval = 1.0, step = 0.5, group = gTrade)
+maxTrades = input.int(1, "Max Trades Per Cycle Per Box", minval = 1, group = gTrade)
+maxBarsTrade = input.int(100, "Max Bars Per Trade", minval = 5, group = gTrade)
+useBoxB = input.bool(true, "Enable Breakout Box", group = gTrade)
+useBoxA = input.bool(true, "Enable Aggressive Box", group = gTrade)
+showBox = input.bool(true, "Show Trade Boxes", group = gTrade)
+boxTransp = input.int(60, "Box Transparency", minval = 0, maxval = 100, group = gTrade)
+
+gShow = "Display"
+theme = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = gShow)
+showClimax = input.bool(true, "Climax (SC / BC)", group = gShow)
+showAR = input.bool(true, "AR", group = gShow)
+showST = input.bool(true, "ST", group = gShow)
+showC = input.bool(true, "Spring / UT (Phase C)", group = gShow)
+showD = input.bool(true, "SOS / SOW (Phase D)", group = gShow)
+showLPS = input.bool(true, "LPS / LPSY", group = gShow)
+showE = input.bool(true, "Phase E Breakout", group = gShow)
+showTier2 = input.bool(true, "Tier 2 Events", group = gShow)
+showTier3 = input.bool(true, "Tier 3 Events", group = gShow)
+showRange = input.bool(true, "Range Lines", group = gShow)
+showPhases = input.bool(true, "Phase Vertical Lines", group = gShow)
+showDash = input.bool(true, "Dashboard", group = gShow)
+
+// ==================== THEME ====================
+chartBg = chart.bg_color
+bgLum = color.r(chartBg) * 0.299 + color.g(chartBg) * 0.587 + color.b(chartBg) * 0.114
+isDark = theme == "Dark" or (theme == "Auto" and bgLum < 128)
+colBg = isDark ? color.new(color.black, 0) : color.new(color.white, 0)
+colFg = isDark ? color.new(color.white, 0) : color.new(color.black, 0)
+colLine = isDark ? color.new(color.white, 20) : color.new(color.black, 30)
+colMid = color.new(color.gray, 0)
+colDim = color.new(color.gray, 50)
+colBoxFill = isDark ? color.new(#808080, boxTransp) : color.new(#404040, boxTransp)
+colBoxBorder = isDark ? color.new(color.white, 40) : color.new(color.black, 50)
+coreBg = isDark ? color.new(color.white, 0) : color.new(color.black, 0)
+coreFg = isDark ? color.new(color.black, 0) : color.new(color.white, 0)
+tier2Bg = color.new(color.gray, 0)
+tier2Fg = isDark ? color.new(color.black, 0) : color.new(color.white, 0)
+
+// ==================== CORE ====================
+atr = ta.atr(atrLen)
+atrLab = nz(atr, math.max(high - low, syminfo.mintick))
+hasVol = not na(volume) and volume > 0
+volMa = ta.sma(volume, volLen)
+rvol = volMa > 0 ? volume / volMa : na
+spread = high - low
+avgSpread = ta.sma(spread, spreadLen)
+wideBar = spread > avgSpread * wideX
+narrowBar = spread < avgSpread * narrowX
+barRange = math.max(spread, syminfo.mintick)
+closePos = (close - low) / barRange
+upBar = close > open
+downBar = close < open
+hiVol = hasVol and rvol >= climaxRVOL
+sosVol = hasVol and rvol >= sosRVOL
+dryVol = hasVol and rvol <= dryRVOL
+priorHigh = ta.highest(high, pivotLen)[1]
+priorLow = ta.lowest(low, pivotLen)[1]
+
+// ==================== RAW EVENTS ====================
+scRaw = downBar and hiVol and wideBar and closePos > 0.5 and low <= priorLow
+bcRaw = upBar and hiVol and wideBar and closePos < 0.5 and high >= priorHigh
+
+// ==================== LEVELS FUNCTION ====================
+f_levels(dir, entry, structPx, top, bot) =>
+    float rangeH = not na(top) and not na(bot) ? math.max(top - bot, syminfo.mintick) : na
+    float slRaw = dir == 1 ? structPx - stopATR * atr : structPx + stopATR * atr
+    float sl = slRaw
+    bool capped = false
+    if dir == 1
+        if not na(slRaw) and entry - slRaw > maxStopATR * atr
+            sl := entry - maxStopATR * atr
+            capped := true
+    else
+        if not na(slRaw) and slRaw - entry > maxStopATR * atr
+            sl := entry + maxStopATR * atr
+            capped := true
+    if not na(sl) and (dir == 1 ? sl >= entry : sl <= entry)
+        sl := na
+    float risk = na(sl) or na(entry) ? na : math.abs(entry - sl)
+    float tpRange = na(rangeH) or na(top) or na(bot) ? na : (dir == 1 ? top + rangeH : bot - rangeH)
+    float tpEntry = na(rangeH) or na(entry) ? na : (dir == 1 ? entry + rangeH : entry - rangeH)
+    bool rangeValid = not na(tpRange) and (dir == 1 ? tpRange > entry : tpRange < entry)
+    bool entryValid = not na(tpEntry) and (dir == 1 ? tpEntry > entry : tpEntry < entry)
+    float rrRange = na(risk) or risk <= 0 or not rangeValid ? na : math.abs(tpRange - entry) / risk
+    float rrEntry = na(risk) or risk <= 0 or not entryValid ? na : math.abs(tpEntry - entry) / risk
+    bool useEntry = not rangeValid or (not na(rrRange) and rrRange > maxRR)
+    float tp = useEntry ? tpEntry : tpRange
+    string mode = useEntry ? "TP-ENTRY" : "TP-RANGE"
+    if useEntry and (na(rrEntry) or rrEntry < minRR)
+        tp := na
+        mode := "NO-TRADE"
+    float rr = na(risk) or risk <= 0 or na(tp) ? na : math.abs(tp - entry) / risk
+    [sl, tp, tpRange, tpEntry, rr, mode, capped]
+
+// ==================== STATE ====================
+var int side = 0
+var int stage = 0
+var bool inRange = false
+var float rTop = na
+var float rBot = na
+var int rStart = na
+var bool reAccum = false
+var bool reDist = false
+var bool failedCycle = false
+var bool evClimax = false
+var bool evAR = false
+var bool evST = false
+var bool evC = false
+var bool evD = false
+var bool evLPS = false
+var bool evE = false
+var bool evPS = false
+var bool evPSY = false
+var bool evShakeout = false
+var bool evTest = false
+var bool evNS = false
+var bool evND = false
+var bool evUTAD = false
+var bool evJAC = false
+var bool evBUEC = false
+var bool evAbsorption = false
+var bool evEffortResult = false
+var bool evExhaustion = false
+var float climaxRVol = na
+var float arHigh = na
+var float arLow = na
+var float springLow = na
+var float utHigh = na
+var float aggrStructLong = na
+var float aggrStructShort = na
+var int lastPSBar = na
+var int lastPSYBar = na
+var int lastAbsBar = na
+var int lastERBar = na
+var int lastExhBar = na
+var line topLine = na
+var line botLine = na
+
+// per-bar event flags
+bool pClimax = false
+bool pAR = false
+bool pST = false
+bool pC = false
+bool pD = false
+bool pLPS = false
+bool pE = false
+bool pFailed = false
+bool pPS = false
+bool pPSY = false
+bool pShakeout = false
+bool pTest = false
+bool pNS = false
+bool pND = false
+bool pUTAD = false
+bool pJAC = false
+bool pBUEC = false
+bool pAbs = false
+bool pER = false
+bool pExh = false
+bool newCycleBar = false
+
+// ==================== PS / PSY RAW ====================
+psRaw = not inRange and downBar and hiVol and low <= priorLow and closePos > 0.35 and not scRaw and (bar_index - nz(lastPSBar, -99999) > eventCooldown)
+psyRaw = not inRange and upBar and hiVol and high >= priorHigh and closePos < 0.65 and not bcRaw and (bar_index - nz(lastPSYBar, -99999) > eventCooldown)
+
+if psRaw
+    lastPSBar := bar_index
+    pPS := true
+
+if psyRaw
+    lastPSYBar := bar_index
+    pPSY := true
+
+// ==================== NEW CYCLE ====================
+rangeBusy = inRange and stage >= 1 and stage <= 3
+newAccum = scRaw and not rangeBusy
+newDist = bcRaw and not rangeBusy and not newAccum
+
+if newAccum
+    reAccum := side == 1 and stage >= 4
+    reDist := false
+    side := 1
+    stage := 1
+    inRange := true
+    rBot := low
+    rTop := high
+    rStart := bar_index
+    climaxRVol := nz(rvol)
+    arHigh := high
+    arLow := low
+    springLow := na
+    utHigh := na
+    aggrStructLong := na
+    aggrStructShort := na
+    evClimax := true
+    evAR := false
+    evST := false
+    evC := false
+    evD := false
+    evLPS := false
+    evE := false
+    evPS := bar_index - nz(lastPSBar, -99999) <= psLookback
+    evPSY := false
+    evShakeout := false
+    evTest := false
+    evNS := false
+    evND := false
+    evUTAD := false
+    evJAC := false
+    evBUEC := false
+    evAbsorption := false
+    evEffortResult := false
+    evExhaustion := false
+    failedCycle := false
+    newCycleBar := true
+    pClimax := true
+    if showRange
+        topLine := line.new(bar_index, rTop, bar_index, rTop, color = colLine, width = 1, style = line.style_dashed)
+        botLine := line.new(bar_index, rBot, bar_index, rBot, color = colLine, width = 1, style = line.style_dashed)
+    else
+        topLine := na
+        botLine := na
+    if showPhases
+        line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+        label.new(bar_index, high + atrLab * 2, "A", style = label.style_none, textcolor = colFg, size = size.tiny)
+
+if newDist
+    reDist := side == -1 and stage >= 4
+    reAccum := false
+    side := -1
+    stage := 1
+    inRange := true
+    rTop := high
+    rBot := low
+    rStart := bar_index
+    climaxRVol := nz(rvol)
+    arHigh := high
+    arLow := low
+    springLow := na
+    utHigh := na
+    aggrStructLong := na
+    aggrStructShort := na
+    evClimax := true
+    evAR := false
+    evST := false
+    evC := false
+    evD := false
+    evLPS := false
+    evE := false
+    evPS := false
+    evPSY := bar_index - nz(lastPSYBar, -99999) <= psLookback
+    evShakeout := false
+    evTest := false
+    evNS := false
+    evND := false
+    evUTAD := false
+    evJAC := false
+    evBUEC := false
+    evAbsorption := false
+    evEffortResult := false
+    evExhaustion := false
+    failedCycle := false
+    newCycleBar := true
+    pClimax := true
+    if showRange
+        topLine := line.new(bar_index, rTop, bar_index, rTop, color = colLine, width = 1, style = line.style_dashed)
+        botLine := line.new(bar_index, rBot, bar_index, rBot, color = colLine, width = 1, style = line.style_dashed)
+    else
+        topLine := na
+        botLine := na
+    if showPhases
+        line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+        label.new(bar_index, high + atrLab * 2, "A", style = label.style_none, textcolor = colFg, size = size.tiny)
+
+// ==================== PHASE A -> B (AR) ====================
+if stage == 1 and inRange and bar_index > rStart + 1
+    if side == 1
+        rBot := math.min(rBot, low)
+        arHigh := na(arHigh) ? high : math.max(arHigh, high)
+        if high - rBot >= arMinX * atr
+            rTop := arHigh
+            evAR := true
+            stage := 2
+            pAR := true
+            if showPhases
+                line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+                label.new(bar_index, high + atrLab * 2, "B", style = label.style_none, textcolor = colFg, size = size.tiny)
+    else
+        rTop := math.max(rTop, high)
+        arLow := na(arLow) ? low : math.min(arLow, low)
+        if rTop - low >= arMinX * atr
+            rBot := arLow
+            evAR := true
+            stage := 2
+            pAR := true
+            if showPhases
+                line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+                label.new(bar_index, high + atrLab * 2, "B", style = label.style_none, textcolor = colFg, size = size.tiny)
+
+// ==================== PHASE B (ST) ====================
+if stage == 2 and inRange and not pAR and bar_index > rStart + 2
+    if side == 1
+        if not evST and low <= rBot + stTolX * atr and close > rBot and nz(rvol) < nz(climaxRVol) and (narrowBar or dryVol)
+            evST := true
+            pST := true
+            aggrStructLong := math.min(nz(aggrStructLong, low), low)
+    else
+        if not evST and high >= rTop - stTolX * atr and close < rTop and nz(rvol) < nz(climaxRVol) and (narrowBar or dryVol)
+            evST := true
+            pST := true
+            aggrStructShort := math.max(nz(aggrStructShort, high), high)
+
+// ==================== PHASE C (SPRING / UT) ====================
+if stage == 2 and inRange and not pAR and bar_index > rStart + 2
+    if side == 1 and low < rBot and close > rBot and closePos > 0.55
+        evC := true
+        stage := 3
+        pC := true
+        springLow := low
+        aggrStructLong := low
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "C", style = label.style_none, textcolor = colFg, size = size.tiny)
+    if side == -1 and high > rTop and close < rTop and closePos < 0.45
+        evC := true
+        stage := 3
+        pC := true
+        utHigh := high
+        aggrStructShort := high
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "C", style = label.style_none, textcolor = colFg, size = size.tiny)
+
+// ==================== SHAKEOUT ====================
+if stage == 2 and inRange and not pAR and not pC
+    if side == 1 and low < rBot and close > rBot and closePos > 0.5 and hiVol
+        evShakeout := true
+        pShakeout := true
+        aggrStructLong := math.min(nz(aggrStructLong, low), low)
+    if side == -1 and high > rTop and close < rTop and closePos < 0.5 and hiVol
+        evShakeout := true
+        pShakeout := true
+        aggrStructShort := math.max(nz(aggrStructShort, high), high)
+
+// ==================== TEST ====================
+if stage == 3 and inRange and evC and not pC
+    if side == 1 and not evTest and not na(springLow) and low <= springLow + stTolX * atr and close > springLow and (dryVol or narrowBar)
+        evTest := true
+        pTest := true
+        aggrStructLong := math.min(nz(aggrStructLong, low), low)
+    if side == -1 and not evTest and not na(utHigh) and high >= utHigh - stTolX * atr and close < utHigh and (dryVol or narrowBar)
+        evTest := true
+        pTest := true
+        aggrStructShort := math.max(nz(aggrStructShort, high), high)
+
+// ==================== PHASE D (SOS / SOW) ====================
+if stage >= 2 and stage <= 3 and inRange
+    if side == 1 and close > rTop + brkBufX * atr and closePos > 0.65 and nz(rvol) >= sosRVOL
+        evD := true
+        stage := 4
+        pD := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "D", style = label.style_none, textcolor = colFg, size = size.tiny)
+    if side == -1 and close < rBot - brkBufX * atr and closePos < 0.35 and nz(rvol) >= sosRVOL
+        evD := true
+        stage := 4
+        pD := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "D", style = label.style_none, textcolor = colFg, size = size.tiny)
+
+// ==================== LPS / LPSY ====================
+if stage == 4 and inRange and not pD
+    if side == 1 and not evLPS and low <= rTop + stTolX * atr and close > rTop
+        evLPS := true
+        pLPS := true
+        aggrStructLong := low
+    if side == -1 and not evLPS and high >= rBot - stTolX * atr and close < rBot
+        evLPS := true
+        pLPS := true
+        aggrStructShort := high
+
+// ==================== JAC ====================
+if stage == 4 and inRange and side == 1 and evLPS and not evJAC and not pD and not pLPS and close > rTop + brkBufX * atr and wideBar and nz(rvol) >= sosRVOL
+    evJAC := true
+    pJAC := true
+
+// ==================== BUEC ====================
+if stage >= 4 and inRange and side == 1 and evJAC and not evBUEC and not pJAC and low <= rTop + stTolX * atr and close > rTop and (dryVol or narrowBar)
+    evBUEC := true
+    pBUEC := true
+
+// ==================== NO SUPPLY / NO DEMAND ====================
+if stage >= 4 and not pE
+    if side == 1 and not evNS and downBar and dryVol and narrowBar and closePos > 0.5
+        evNS := true
+        pNS := true
+    if side == -1 and not evND and upBar and dryVol and narrowBar and closePos < 0.5
+        evND := true
+        pND := true
+
+// ==================== UTAD ====================
+if stage >= 3 and inRange and side == -1 and evC and not evUTAD and not pC and high > rTop and close < rTop and closePos < 0.45 and nz(rvol) >= sosRVOL
+    evUTAD := true
+    pUTAD := true
+
+// ==================== PHASE E (MARKUP / MARKDOWN) ====================
+if stage >= 3 and inRange
+    if side == 1 and close > rTop + phaseEX * atr
+        evE := true
+        stage := 5
+        inRange := false
+        pE := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "E", style = label.style_none, textcolor = colFg, size = size.tiny)
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_xy2(topLine, bar_index, rTop)
+            line.set_xy2(botLine, bar_index, rBot)
+            line.set_color(topLine, colFg)
+            line.set_color(botLine, colFg)
+    if side == -1 and close < rBot - phaseEX * atr
+        evE := true
+        stage := 5
+        inRange := false
+        pE := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = colDim, style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "E", style = label.style_none, textcolor = colFg, size = size.tiny)
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_xy2(topLine, bar_index, rTop)
+            line.set_xy2(botLine, bar_index, rBot)
+            line.set_color(topLine, colFg)
+            line.set_color(botLine, colFg)
+
+// ==================== FAILED CYCLE ====================
+if inRange and stage >= 1 and stage <= 4
+    if side == 1 and close < rBot - phaseEX * atr
+        failedCycle := true
+        pFailed := true
+        inRange := false
+        stage := 0
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_xy2(topLine, bar_index, rTop)
+            line.set_xy2(botLine, bar_index, rBot)
+            line.set_color(topLine, colDim)
+            line.set_color(botLine, colDim)
+    if side == -1 and close > rTop + phaseEX * atr
+        failedCycle := true
+        pFailed := true
+        inRange := false
+        stage := 0
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_xy2(topLine, bar_index, rTop)
+            line.set_xy2(botLine, bar_index, rBot)
+            line.set_color(topLine, colDim)
+            line.set_color(botLine, colDim)
+
+// ==================== RANGE TIMEOUT ====================
+if inRange and stage >= 1 and stage <= 4 and bar_index - rStart > maxRangeBars
+    inRange := false
+    stage := 0
+    if showRange and not na(topLine) and not na(botLine)
+        line.set_xy2(topLine, bar_index, rTop)
+        line.set_xy2(botLine, bar_index, rBot)
+        line.set_color(topLine, colDim)
+        line.set_color(botLine, colDim)
+
+// ==================== TIER 3 CONTEXT ====================
+absorptionRaw = sosVol and narrowBar and not pClimax
+effortResultRaw = hiVol and wideBar and spread > 0 and math.abs(close - open) < spread * 0.4
+exhaustionRaw = hiVol and wideBar and stage >= 4 and ((side == 1 and closePos < 0.35) or (side == -1 and closePos > 0.65))
+
+if absorptionRaw and not evAbsorption and (bar_index - nz(lastAbsBar, -99999) > eventCooldown)
+    evAbsorption := true
+    pAbs := true
+    lastAbsBar := bar_index
+
+if effortResultRaw and not evEffortResult and (bar_index - nz(lastERBar, -99999) > eventCooldown)
+    evEffortResult := true
+    pER := true
+    lastERBar := bar_index
+
+if exhaustionRaw and not evExhaustion and (bar_index - nz(lastExhBar, -99999) > eventCooldown)
+    evExhaustion := true
+    pExh := true
+    lastExhBar := bar_index
+
+// ==================== SCORE ====================
+coreCount = (evClimax ? 1 : 0) + (evAR ? 1 : 0) + (evST ? 1 : 0) + (evC ? 1 : 0) + (evD ? 1 : 0) + (evLPS ? 1 : 0)
+tier2Count = (evPS ? 1 : 0) + (evPSY ? 1 : 0) + (evShakeout ? 1 : 0) + (evTest ? 1 : 0) + (evNS ? 1 : 0) + (evND ? 1 : 0) + (evUTAD ? 1 : 0) + (evJAC ? 1 : 0) + (evBUEC ? 1 : 0)
+tier3Count = (evAbsorption ? 1 : 0) + (evEffortResult ? 1 : 0) + (evExhaustion ? 1 : 0)
+setupScore = math.min(10.0, coreCount + tier2Count * 0.5 + tier3Count * 0.25)
+
+missingTxt = coreCount >= 6 ? "none" : (evClimax ? "" : "SC/BC ") + (evAR ? "" : "AR ") + (evST ? "" : "ST ") + (evC ? "" : "C ") + (evD ? "" : "D ") + (evLPS ? "" : "LPS ")
+if stage == 0
+    missingTxt := "none"
+
+// ==================== TRADE LEVELS ====================
+longStructA = nz(aggrStructLong, nz(springLow, rBot))
+longStructB = rTop
+shortStructA = nz(aggrStructShort, nz(utHigh, rTop))
+shortStructB = rBot
+
+[longSLA, longTPA, longTPRangeA, longTPEntryA, longRRA, longTPModeA, longCapA] = f_levels(1, close, longStructA, rTop, rBot)
+[longSLB, longTPB, longTPRangeB, longTPEntryB, longRRB, longTPModeB, longCapB] = f_levels(1, close, longStructB, rTop, rBot)
+[shortSLA, shortTPA, shortTPRangeA, shortTPEntryA, shortRRA, shortTPModeA, shortCapA] = f_levels(-1, close, shortStructA, rTop, rBot)
+[shortSLB, shortTPB, shortTPRangeB, shortTPEntryB, shortRRB, shortTPModeB, shortCapB] = f_levels(-1, close, shortStructB, rTop, rBot)
+
+longTPAltA = longTPModeA == "TP-RANGE" ? (longTPEntryA > close ? longTPEntryA : na) : (longTPRangeA > close ? longTPRangeA : na)
+longTPAltB = longTPModeB == "TP-RANGE" ? (longTPEntryB > close ? longTPEntryB : na) : (longTPRangeB > close ? longTPRangeB : na)
+shortTPAltA = shortTPModeA == "TP-RANGE" ? (shortTPEntryA < close ? shortTPEntryA : na) : (shortTPRangeA < close ? shortTPRangeA : na)
+shortTPAltB = shortTPModeB == "TP-RANGE" ? (shortTPEntryB < close ? shortTPEntryB : na) : (shortTPRangeB < close ? shortTPRangeB : na)
+
+longRRAOK = not na(longRRA) and longRRA >= minRR
+longRRBOK = not na(longRRB) and longRRB >= minRR
+shortRRAOK = not na(shortRRA) and shortRRA >= minRR
+shortRRBOK = not na(shortRRB) and shortRRB >= minRR
+
+riskCapFlag = (stage > 0 or pE) and (side == 1 ? (longCapA or longCapB) : side == -1 ? (shortCapA or shortCapB) : false)
+
+// ==================== SETUP FILTERS ====================
+longSetupOK = side == 1 and coreCount >= minCoreEvents and setupScore >= minScore and not failedCycle and (stage > 0 or pE) and not na(atr) and not na(rTop) and not na(rBot)
+shortSetupOK = side == -1 and coreCount >= minCoreEvents and setupScore >= minScore and not failedCycle and (stage > 0 or pE) and not na(atr) and not na(rTop) and not na(rBot)
+longOrderOK = longSetupOK and (longRRBOK or longRRAOK)
+shortOrderOK = shortSetupOK and (shortRRBOK or shortRRAOK)
+// ==================== BIAS ====================
+string biasTxt = "NEUTRAL"
+if not na(rTop) and not na(rBot) and close > rTop
+    biasTxt := "BULLISH"
+else if not na(rTop) and not na(rBot) and close < rBot
+    biasTxt := "BEARISH"
+else if side == 1 and stage >= 4
+    biasTxt := "BULLISH"
+else if side == -1 and stage >= 4
+    biasTxt := "BEARISH"
+
+// ==================== TRADE STATE ====================
+var bool boxBActive = false
+var int boxBDir = 0
+var float boxBEntry = na
+var float boxBTP = na
+var float boxBTPAlt = na
+var float boxBSL = na
+var float boxBRR = na
+var int boxBBar = na
+var string boxBTPMode = ""
+var string boxBTPAltMode = ""
+var int boxBTrades = 0
+var box boxBObj = na
+var line boxBEntryLine = na
+var line boxBTPLine = na
+var line boxBTPAltLine = na
+var line boxBSLLine = na
+var label boxBEntryLab = na
+var label boxBTPLab = na
+var label boxBTPAltLab = na
+var label boxBSLLab = na
+
+var bool boxAActive = false
+var int boxADir = 0
+var float boxAEntry = na
+var float boxATP = na
+var float boxATPAlt = na
+var float boxASL = na
+var float boxARR = na
+var int boxABar = na
+var string boxATPMode = ""
+var string boxATPAltMode = ""
+var int boxATrades = 0
+var box boxAObj = na
+var line boxAEntryLine = na
+var line boxATLine = na
+var line boxATAltLine = na
+var line boxASLLine = na
+var label boxAEntryLab = na
+var label boxATLab = na
+var label boxATAltLab = na
+var label boxASLLab = na
+
+bool boxBTPHit = false
+bool boxBSLHit = false
+bool boxBClosedThisBar = false
+bool boxBWin = false
+bool boxATPHit = false
+bool boxASLHit = false
+bool boxAClosedThisBar = false
+bool boxAWin = false
+
+if newCycleBar
+    boxBTrades := 0
+    boxATrades := 0
+
+// ==================== ORDER ADVISORY ====================
+anyActive = boxBActive or boxAActive
+string orderTxt = "NO TRADE"
+if anyActive
+    orderTxt := "IN TRADE"
+else if longOrderOK
+    float trigL = rTop + brkBufX * atr
+    if close > trigL
+        orderTxt := close - trigL <= 0.5 * atr ? "MARKET NOW LONG" : "WAIT RETEST @ " + str.tostring(trigL, format.mintick)
+    else
+        orderTxt := "WAIT BREAKOUT @ " + str.tostring(trigL, format.mintick)
+else if shortOrderOK
+    float trigS = rBot - brkBufX * atr
+    if close < trigS
+        orderTxt := trigS - close <= 0.5 * atr ? "MARKET NOW SHORT" : "WAIT RETEST @ " + str.tostring(trigS, format.mintick)
+    else
+        orderTxt := "WAIT BREAKOUT @ " + str.tostring(trigS, format.mintick)
+else if failedCycle
+    orderTxt := "NO TRADE (FAILED)"
+
+// ==================== TRADE MANAGEMENT: BOX B ====================
+if boxBActive
+    hitTP = boxBDir == 1 ? high >= boxBTP : low <= boxBTP
+    hitSL = boxBDir == 1 ? low <= boxBSL : high >= boxBSL
+    timeout = bar_index - boxBBar >= maxBarsTrade
+    boxBTPHit := hitTP and not hitSL
+    boxBSLHit := hitSL
+    if hitTP or hitSL or timeout
+        boxBWin := hitTP and not hitSL
+        if showBox and not na(boxBObj)
+            box.set_right(boxBObj, math.max(bar_index, boxBBar + 1))
+            box.set_border_color(boxBObj, boxBWin ? colFg : colDim)
+            box.set_text(boxBObj, boxBWin ? "B TP" : hitSL ? "B SL" : "B TIME")
+            box.set_text_color(boxBObj, colFg)
+        if showBox and not na(boxBEntryLine)
+            line.set_x2(boxBEntryLine, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBTPLine)
+            line.set_x2(boxBTPLine, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBTPAltLine)
+            line.set_x2(boxBTPAltLine, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBSLLine)
+            line.set_x2(boxBSLLine, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBEntryLab)
+            label.set_x(boxBEntryLab, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBTPLab)
+            label.set_x(boxBTPLab, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBTPAltLab)
+            label.set_x(boxBTPAltLab, math.max(bar_index, boxBBar + 1))
+        if showBox and not na(boxBSLLab)
+            label.set_x(boxBSLLab, math.max(bar_index, boxBBar + 1))
+        boxBActive := false
+        boxBClosedThisBar := true
+
+// ==================== TRADE MANAGEMENT: BOX A ====================
+if boxAActive
+    hitTP = boxADir == 1 ? high >= boxATP : low <= boxATP
+    hitSL = boxADir == 1 ? low <= boxASL : high >= boxASL
+    timeout = bar_index - boxABar >= maxBarsTrade
+    boxATPHit := hitTP and not hitSL
+    boxASLHit := hitSL
+    if hitTP or hitSL or timeout
+        boxAWin := hitTP and not hitSL
+        if showBox and not na(boxAObj)
+            box.set_right(boxAObj, math.max(bar_index, boxABar + 1))
+            box.set_border_color(boxAObj, boxAWin ? colFg : colDim)
+            box.set_text(boxAObj, boxAWin ? "A TP" : hitSL ? "A SL" : "A TIME")
+            box.set_text_color(boxAObj, colFg)
+        if showBox and not na(boxAEntryLine)
+            line.set_x2(boxAEntryLine, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxATLine)
+            line.set_x2(boxATLine, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxATAltLine)
+            line.set_x2(boxATAltLine, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxASLLine)
+            line.set_x2(boxASLLine, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxAEntryLab)
+            label.set_x(boxAEntryLab, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxATLab)
+            label.set_x(boxATLab, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxATAltLab)
+            label.set_x(boxATAltLab, math.max(bar_index, boxABar + 1))
+        if showBox and not na(boxASLLab)
+            label.set_x(boxASLLab, math.max(bar_index, boxABar + 1))
+        boxAActive := false
+        boxAClosedThisBar := true
+
+// ==================== SIGNALS ====================
+longBreakTrigB = ta.crossover(close, rTop + brkBufX * atr) or (pD and close > rTop + brkBufX * atr)
+shortBreakTrigB = ta.crossunder(close, rBot - brkBufX * atr) or (pD and close < rBot - brkBufX * atr)
+longAggrTrigA = pC or pST or pShakeout or pTest or pLPS
+shortAggrTrigA = pC or pST or pShakeout or pTest or pLPS
+
+longSignalB = useBoxB and longSetupOK and (inRange or pE or stage == 5) and longBreakTrigB and not boxBActive and not boxBClosedThisBar and boxBTrades < maxTrades and longRRBOK
+longSignalA = useBoxA and longSetupOK and (inRange or pE) and longAggrTrigA and not boxAActive and not boxAClosedThisBar and boxATrades < maxTrades and longRRAOK
+shortSignalB = useBoxB and shortSetupOK and (inRange or pE or stage == 5) and shortBreakTrigB and not boxBActive and not boxBClosedThisBar and boxBTrades < maxTrades and shortRRBOK
+shortSignalA = useBoxA and shortSetupOK and (inRange or pE) and shortAggrTrigA and not boxAActive and not boxAClosedThisBar and boxATrades < maxTrades and shortRRAOK
+
+// ==================== ENTRY: BOX B ====================
+if longSignalB
+    boxBActive := true
+    boxBTrades := boxBTrades + 1
+    boxBDir := 1
+    boxBEntry := close
+    boxBTP := longTPB
+    boxBTPAlt := longTPAltB
+    boxBTPAltLine := na
+    boxBTPAltLab := na
+    boxBSL := longSLB
+    boxBRR := longRRB
+    boxBBar := bar_index
+    boxBTPMode := longTPModeB
+    boxBTPAltMode := longTPModeB == "TP-RANGE" ? "TP-ENTRY" : "TP-RANGE"
+    if showBox
+        boxBObj := box.new(bar_index, math.max(boxBTP, boxBSL), bar_index + 1, math.min(boxBTP, boxBSL), border_color = colBoxBorder, bgcolor = colBoxFill, border_width = 1, text = "B LONG", text_color = colFg, text_size = size.tiny)
+        boxBEntryLine := line.new(bar_index, boxBEntry, bar_index + 1, boxBEntry, color = colMid, width = 1)
+        boxBTPLine := line.new(bar_index, boxBTP, bar_index + 1, boxBTP, color = colLine, width = 1)
+        boxBSLLine := line.new(bar_index, boxBSL, bar_index + 1, boxBSL, color = colLine, width = 1)
+        if not na(boxBTPAlt)
+            boxBTPAltLine := line.new(bar_index, boxBTPAlt, bar_index + 1, boxBTPAlt, color = colDim, width = 1)
+            boxBTPAltLab := label.new(bar_index, boxBTPAlt, boxBTPAltMode + " " + str.tostring(boxBTPAlt, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colDim, size = size.tiny)
+        boxBEntryLab := label.new(bar_index, boxBEntry, "ENTRY " + str.tostring(boxBEntry, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxBTPLab := label.new(bar_index, boxBTP, boxBTPMode + " " + str.tostring(boxBTP, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxBSLLab := label.new(bar_index, boxBSL, "SL " + str.tostring(boxBSL, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+
+if shortSignalB
+    boxBActive := true
+    boxBTrades := boxBTrades + 1
+    boxBDir := -1
+    boxBEntry := close
+    boxBTP := shortTPB
+    boxBTPAlt := shortTPAltB
+    boxBTPAltLine := na
+    boxBTPAltLab := na
+    boxBSL := shortSLB
+    boxBRR := shortRRB
+    boxBBar := bar_index
+    boxBTPMode := shortTPModeB
+    boxBTPAltMode := shortTPModeB == "TP-RANGE" ? "TP-ENTRY" : "TP-RANGE"
+    if showBox
+        boxBObj := box.new(bar_index, math.max(boxBTP, boxBSL), bar_index + 1, math.min(boxBTP, boxBSL), border_color = colBoxBorder, bgcolor = colBoxFill, border_width = 1, text = "B SHORT", text_color = colFg, text_size = size.tiny)
+        boxBEntryLine := line.new(bar_index, boxBEntry, bar_index + 1, boxBEntry, color = colMid, width = 1)
+        boxBTPLine := line.new(bar_index, boxBTP, bar_index + 1, boxBTP, color = colLine, width = 1)
+        boxBSLLine := line.new(bar_index, boxBSL, bar_index + 1, boxBSL, color = colLine, width = 1)
+        if not na(boxBTPAlt)
+            boxBTPAltLine := line.new(bar_index, boxBTPAlt, bar_index + 1, boxBTPAlt, color = colDim, width = 1)
+            boxBTPAltLab := label.new(bar_index, boxBTPAlt, boxBTPAltMode + " " + str.tostring(boxBTPAlt, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colDim, size = size.tiny)
+        boxBEntryLab := label.new(bar_index, boxBEntry, "ENTRY " + str.tostring(boxBEntry, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxBTPLab := label.new(bar_index, boxBTP, boxBTPMode + " " + str.tostring(boxBTP, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxBSLLab := label.new(bar_index, boxBSL, "SL " + str.tostring(boxBSL, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+
+// ==================== ENTRY: BOX A ====================
+if longSignalA
+    boxAActive := true
+    boxATrades := boxATrades + 1
+    boxADir := 1
+    boxAEntry := close
+    boxATP := longTPA
+    boxATPAlt := longTPAltA
+    boxATAltLine := na
+    boxATAltLab := na
+    boxASL := longSLA
+    boxARR := longRRA
+    boxABar := bar_index
+    boxATPMode := longTPModeA
+    boxATPAltMode := longTPModeA == "TP-RANGE" ? "TP-ENTRY" : "TP-RANGE"
+    if showBox
+        boxAObj := box.new(bar_index, math.max(boxATP, boxASL), bar_index + 1, math.min(boxATP, boxASL), border_color = colBoxBorder, bgcolor = colBoxFill, border_width = 1, text = "A LONG", text_color = colFg, text_size = size.tiny)
+        boxAEntryLine := line.new(bar_index, boxAEntry, bar_index + 1, boxAEntry, color = colMid, width = 1)
+        boxATLine := line.new(bar_index, boxATP, bar_index + 1, boxATP, color = colLine, width = 1)
+        boxASLLine := line.new(bar_index, boxASL, bar_index + 1, boxASL, color = colLine, width = 1)
+        if not na(boxATPAlt)
+            boxATAltLine := line.new(bar_index, boxATPAlt, bar_index + 1, boxATPAlt, color = colDim, width = 1)
+            boxATAltLab := label.new(bar_index, boxATPAlt, boxATPAltMode + " " + str.tostring(boxATPAlt, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colDim, size = size.tiny)
+        boxAEntryLab := label.new(bar_index, boxAEntry, "ENTRY " + str.tostring(boxAEntry, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxATLab := label.new(bar_index, boxATP, boxATPMode + " " + str.tostring(boxATP, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxASLLab := label.new(bar_index, boxASL, "SL " + str.tostring(boxASL, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+
+if shortSignalA
+    boxAActive := true
+    boxATrades := boxATrades + 1
+    boxADir := -1
+    boxAEntry := close
+    boxATP := shortTPA
+    boxATPAlt := shortTPAltA
+    boxATAltLine := na
+    boxATAltLab := na
+    boxASL := shortSLA
+    boxARR := shortRRA
+    boxABar := bar_index
+    boxATPMode := shortTPModeA
+    boxATPAltMode := shortTPModeA == "TP-RANGE" ? "TP-ENTRY" : "TP-RANGE"
+    if showBox
+        boxAObj := box.new(bar_index, math.max(boxATP, boxASL), bar_index + 1, math.min(boxATP, boxASL), border_color = colBoxBorder, bgcolor = colBoxFill, border_width = 1, text = "A SHORT", text_color = colFg, text_size = size.tiny)
+        boxAEntryLine := line.new(bar_index, boxAEntry, bar_index + 1, boxAEntry, color = colMid, width = 1)
+        boxATLine := line.new(bar_index, boxATP, bar_index + 1, boxATP, color = colLine, width = 1)
+        boxASLLine := line.new(bar_index, boxASL, bar_index + 1, boxASL, color = colLine, width = 1)
+        if not na(boxATPAlt)
+            boxATAltLine := line.new(bar_index, boxATPAlt, bar_index + 1, boxATPAlt, color = colDim, width = 1)
+            boxATAltLab := label.new(bar_index, boxATPAlt, boxATPAltMode + " " + str.tostring(boxATPAlt, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colDim, size = size.tiny)
+        boxAEntryLab := label.new(bar_index, boxAEntry, "ENTRY " + str.tostring(boxAEntry, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxATLab := label.new(bar_index, boxATP, boxATPMode + " " + str.tostring(boxATP, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+        boxASLLab := label.new(bar_index, boxASL, "SL " + str.tostring(boxASL, format.mintick), style = label.style_label_right, color = color.new(colBg, 15), textcolor = colFg, size = size.tiny)
+
+// ==================== ACTIVE BOX UPDATES ====================
+if boxBActive and showBox
+    if not na(boxBObj)
+        box.set_right(boxBObj, math.max(bar_index, boxBBar + 1))
+    if not na(boxBEntryLine)
+        line.set_x2(boxBEntryLine, math.max(bar_index, boxBBar + 1))
+    if not na(boxBTPLine)
+        line.set_x2(boxBTPLine, math.max(bar_index, boxBBar + 1))
+    if not na(boxBTPAltLine)
+        line.set_x2(boxBTPAltLine, math.max(bar_index, boxBBar + 1))
+    if not na(boxBSLLine)
+        line.set_x2(boxBSLLine, math.max(bar_index, boxBBar + 1))
+    if not na(boxBEntryLab)
+        label.set_x(boxBEntryLab, math.max(bar_index, boxBBar + 1))
+    if not na(boxBTPLab)
+        label.set_x(boxBTPLab, math.max(bar_index, boxBBar + 1))
+    if not na(boxBTPAltLab)
+        label.set_x(boxBTPAltLab, math.max(bar_index, boxBBar + 1))
+    if not na(boxBSLLab)
+        label.set_x(boxBSLLab, math.max(bar_index, boxBBar + 1))
+
+if boxAActive and showBox
+    if not na(boxAObj)
+        box.set_right(boxAObj, math.max(bar_index, boxABar + 1))
+    if not na(boxAEntryLine)
+        line.set_x2(boxAEntryLine, math.max(bar_index, boxABar + 1))
+    if not na(boxATLine)
+        line.set_x2(boxATLine, math.max(bar_index, boxABar + 1))
+    if not na(boxATAltLine)
+        line.set_x2(boxATAltLine, math.max(bar_index, boxABar + 1))
+    if not na(boxASLLine)
+        line.set_x2(boxASLLine, math.max(bar_index, boxABar + 1))
+    if not na(boxAEntryLab)
+        label.set_x(boxAEntryLab, math.max(bar_index, boxABar + 1))
+    if not na(boxATLab)
+        label.set_x(boxATLab, math.max(bar_index, boxABar + 1))
+    if not na(boxATAltLab)
+        label.set_x(boxATAltLab, math.max(bar_index, boxABar + 1))
+    if not na(boxASLLab)
+        label.set_x(boxASLLab, math.max(bar_index, boxABar + 1))
+
+// ==================== RANGE LINES ====================
+if inRange and showRange and not na(topLine) and not na(botLine)
+    line.set_xy1(topLine, rStart, rTop)
+    line.set_xy2(topLine, bar_index, rTop)
+    line.set_xy1(botLine, rStart, rBot)
+    line.set_xy2(botLine, bar_index, rBot)
+
+// ==================== EVENT MARKERS ====================
+plotshape(showClimax and pClimax and side == 1, "SC Up", shape.labelup, location.belowbar, coreBg, text = "SC", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showClimax and pClimax and side == -1, "BC Down", shape.labeldown, location.abovebar, coreBg, text = "BC", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showAR and pAR and side == 1, "AR Up", shape.triangleup, location.abovebar, colMid, text = "AR", textcolor = colFg, size = size.tiny, force_overlay = true)
+plotshape(showAR and pAR and side == -1, "AR Down", shape.triangledown, location.belowbar, colMid, text = "AR", textcolor = colFg, size = size.tiny, force_overlay = true)
+plotshape(showST and pST and side == 1, "ST Up", shape.circle, location.belowbar, colMid, text = "ST", textcolor = colFg, size = size.tiny, force_overlay = true)
+plotshape(showST and pST and side == -1, "ST Down", shape.circle, location.abovebar, colMid, text = "ST", textcolor = colFg, size = size.tiny, force_overlay = true)
+plotshape(showC and pC and side == 1, "Spring", shape.diamond, location.belowbar, coreBg, text = "SPR", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showC and pC and side == -1, "UT", shape.diamond, location.abovebar, coreBg, text = "UT", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showD and pD and side == 1, "SOS", shape.triangleup, location.belowbar, coreBg, text = "SOS", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showD and pD and side == -1, "SOW", shape.triangledown, location.abovebar, coreBg, text = "SOW", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showLPS and pLPS and side == 1, "LPS", shape.labelup, location.belowbar, coreBg, text = "LPS", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showLPS and pLPS and side == -1, "LPSY", shape.labeldown, location.abovebar, coreBg, text = "LPSY", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showE and pE and side == 1, "Phase E Up", shape.arrowup, location.belowbar, coreBg, text = "E", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showE and pE and side == -1, "Phase E Down", shape.arrowdown, location.abovebar, coreBg, text = "E", textcolor = coreFg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pPS, "PS", shape.labelup, location.belowbar, tier2Bg, text = "PS", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pPSY, "PSY", shape.labeldown, location.abovebar, tier2Bg, text = "PSY", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pShakeout and side == 1, "Shakeout Up", shape.diamond, location.belowbar, tier2Bg, text = "SHK", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pShakeout and side == -1, "Shakeout Down", shape.diamond, location.abovebar, tier2Bg, text = "SHK", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pTest and side == 1, "Test Up", shape.circle, location.belowbar, tier2Bg, text = "TEST", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pTest and side == -1, "Test Down", shape.circle, location.abovebar, tier2Bg, text = "TEST", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pNS, "No Supply", shape.triangleup, location.belowbar, tier2Bg, text = "NS", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pND, "No Demand", shape.triangledown, location.abovebar, tier2Bg, text = "ND", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pUTAD, "UTAD", shape.labeldown, location.abovebar, tier2Bg, text = "UTAD", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pJAC, "JAC", shape.labelup, location.belowbar, tier2Bg, text = "JAC", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier2 and pBUEC, "BUEC", shape.circle, location.belowbar, tier2Bg, text = "BUEC", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier3 and pAbs, "Absorption", shape.square, location.belowbar, tier2Bg, text = "ABS", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier3 and pER, "Effort vs Result", shape.square, location.abovebar, tier2Bg, text = "E/R", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(showTier3 and pExh, "Exhaustion", shape.xcross, location.abovebar, tier2Bg, text = "EXH", textcolor = tier2Fg, size = size.tiny, force_overlay = true)
+plotshape(pFailed, "Failed Cycle", shape.xcross, location.abovebar, colDim, text = "FAIL", textcolor = colFg, size = size.tiny, force_overlay = true)
+plotshape(longSignalB or longSignalA, "LONG Signal", shape.labelup, location.belowbar, coreBg, text = "LONG", textcolor = coreFg, size = size.small, force_overlay = true)
+plotshape(shortSignalB or shortSignalA, "SHORT Signal", shape.labeldown, location.abovebar, tier2Bg, text = "SHORT", textcolor = tier2Fg, size = size.small, force_overlay = true)
+
+bgcolor(longSignalB or longSignalA ? color.new(coreBg, 90) : shortSignalB or shortSignalA ? color.new(tier2Bg, 90) : pFailed ? color.new(colMid, 90) : na, title = "Signal BG", force_overlay = true)
+
+// ==================== DASHBOARD ====================
+string cycleTxt = "NO CYCLE"
+if failedCycle
+    cycleTxt := "FAILED CYCLE"
+else if stage > 0
+    if side == 1
+        cycleTxt := stage == 5 ? "MARKUP" : reAccum ? "RE-ACCUMULATION" : "ACCUMULATION"
+    else if side == -1
+        cycleTxt := stage == 5 ? "MARKDOWN" : reDist ? "REDISTRIBUTION" : "DISTRIBUTION"
+
+string phaseTxt = "none"
+if stage == 1
+    phaseTxt := "A - Stopping"
+else if stage == 2
+    phaseTxt := "B - Building Cause"
+else if stage == 3
+    phaseTxt := "C - Test / Spring"
+else if stage == 4
+    phaseTxt := "D - Trend Test"
+else if stage == 5
+    phaseTxt := "E - Trend"
+
+string scoreTxt = str.tostring(setupScore, "#.#") + " / 10"
+string eventsTxt = "C " + str.tostring(coreCount) + "/6  T2 " + str.tostring(tier2Count) + "/9  T3 " + str.tostring(tier3Count) + "/3"
+string riskTxt = "HIGH"
+if failedCycle
+    riskTxt := "FAILED - HIGH"
+else if riskCapFlag
+    riskTxt := "HIGH (SL CAP)"
+else if setupScore >= 7
+    riskTxt := "LOW"
+else if setupScore >= 5
+    riskTxt := "MEDIUM"
+riskCol = riskTxt == "LOW" ? colFg : riskTxt == "MEDIUM" ? colMid : colDim
+biasCol = biasTxt == "BULLISH" ? colFg : biasTxt == "BEARISH" ? colMid : colDim
+rangeTxt = inRange ? str.tostring(rTop, format.mintick) + " / " + str.tostring(rBot, format.mintick) : "none"
+debugTxt = "RVOL " + str.tostring(nz(rvol, 0), "#.##") + "  ATR " + str.tostring(nz(atr, 0), format.mintick)
+
+string boxBTxt = "none (" + str.tostring(boxBTrades) + "/" + str.tostring(maxTrades) + ")"
+if boxBActive
+    boxBTxt := (boxBDir == 1 ? "LONG " : "SHORT ") + "E " + str.tostring(boxBEntry, format.mintick) + " " + boxBTPMode + " " + str.tostring(boxBTP, format.mintick) + " SL " + str.tostring(boxBSL, format.mintick) + " RR " + str.tostring(boxBRR, "#.##")
+
+string boxATxt = "none (" + str.tostring(boxATrades) + "/" + str.tostring(maxTrades) + ")"
+if boxAActive
+    boxATxt := (boxADir == 1 ? "LONG " : "SHORT ") + "E " + str.tostring(boxAEntry, format.mintick) + " " + boxATPMode + " " + str.tostring(boxATP, format.mintick) + " SL " + str.tostring(boxASL, format.mintick) + " RR " + str.tostring(boxARR, "#.##")
+
+var table dash = table.new(position.top_right, 2, 12, bgcolor = color.new(colBg, showDash ? 15 : 100), border_width = 1, border_color = color.new(colMid, 70))
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "CYCLE", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 0, cycleTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 1, "PHASE", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 1, phaseTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 2, "BIAS", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 2, biasTxt, text_color = biasCol, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 3, "SCORE", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 3, scoreTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 4, "EVENTS", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 4, eventsTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 5, "MISSING", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 5, missingTxt, text_color = colMid, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 6, "RISK", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 6, riskTxt, text_color = riskCol, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 7, "ORDER", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 7, orderTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 8, "BOX B", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 8, boxBTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 9, "BOX A", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 9, boxATxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 10, "RANGE", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 10, rangeTxt, text_color = colFg, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dash, 0, 11, "DATA", text_color = colMid, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 11, debugTxt, text_color = colMid, text_size = size.tiny, text_halign = text.align_right)
+
+// ==================== ALERTS ====================
+alertcondition(longSignalB, "WCP LONG Breakout", "Wyckoff LONG Breakout {{ticker}} {{interval}} @ {{close}}")
+alertcondition(longSignalA, "WCP LONG Aggressive", "Wyckoff LONG Aggressive {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSignalB, "WCP SHORT Breakout", "Wyckoff SHORT Breakout {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSignalA, "WCP SHORT Aggressive", "Wyckoff SHORT Aggressive {{ticker}} {{interval}} @ {{close}}")
+alertcondition(boxBTPHit, "Box B TP Hit", "Box B TP {{ticker}} {{interval}} @ {{close}}")
+alertcondition(boxBSLHit, "Box B SL Hit", "Box B SL {{ticker}} {{interval}} @ {{close}}")
+alertcondition(boxATPHit, "Box A TP Hit", "Box A TP {{ticker}} {{interval}} @ {{close}}")
+alertcondition(boxASLHit, "Box A SL Hit", "Box A SL {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pClimax and side == 1, "Selling Climax", "SC {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pClimax and side == -1, "Buying Climax", "BC {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pAR, "AR", "AR {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pST, "ST", "ST {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pC, "Spring / UT", "Phase C event {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pD, "SOS / SOW", "Phase D event {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pLPS, "LPS / LPSY", "LPS / LPSY {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pE, "Phase E", "Phase E breakout {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pPS, "PS", "Preliminary Support {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pPSY, "PSY", "Preliminary Supply {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pShakeout, "Shakeout", "Shakeout {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pTest, "Test", "Test {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pNS, "No Supply", "No Supply {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pND, "No Demand", "No Demand {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pUTAD, "UTAD", "UTAD {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pJAC, "JAC", "Jump Across the Creek {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pBUEC, "BUEC", "Back Up to the Edge of the Creek {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pAbs, "Absorption", "Absorption {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pER, "Effort vs Result", "Effort vs Result {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pExh, "Exhaustion", "Exhaustion {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pFailed, "Failed Cycle", "Failed cycle {{ticker}} {{interval}} @ {{close}}")

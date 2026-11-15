@@ -1,0 +1,427 @@
+//@version=6
+indicator("Wyckoff Cycle Pro", "WCP", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ==================== INPUTS ====================
+gVol = "Volume"
+volLen = input.int(20, "Volume MA Length", minval = 1, group = gVol)
+climaxRVOL = input.float(2.0, "Climax RVOL", minval = 1.0, step = 0.1, group = gVol)
+sosRVOL = input.float(1.5, "SOS / SOW RVOL", minval = 1.0, step = 0.1, group = gVol)
+dryRVOL = input.float(0.7, "Dry-Up RVOL", maxval = 1.0, step = 0.1, group = gVol)
+
+gRange = "Range and Phases"
+spreadLen = input.int(20, "Average Spread Length", minval = 1, group = gRange)
+wideX = input.float(1.4, "Wide Spread (x avg)", minval = 1.0, step = 0.1, group = gRange)
+narrowX = input.float(0.7, "Narrow Spread (x avg)", maxval = 1.0, step = 0.1, group = gRange)
+pivotLen = input.int(10, "Structure Lookback", minval = 2, group = gRange)
+arMinX = input.float(1.0, "AR Move (x ATR)", minval = 0.2, step = 0.1, group = gRange)
+stTolX = input.float(0.35, "ST Tolerance (x ATR)", minval = 0.05, step = 0.05, group = gRange)
+brkBufX = input.float(0.15, "Breakout Buffer (x ATR)", minval = 0.0, step = 0.05, group = gRange)
+phaseEX = input.float(1.5, "Phase E Distance (x ATR)", minval = 0.2, step = 0.1, group = gRange)
+maxRangeBars = input.int(300, "Max Bars In Range", minval = 20, group = gRange)
+
+gSig = "Signals"
+minScore = input.int(3, "Minimum Score (0-6)", minval = 0, maxval = 6, group = gSig)
+entryMode = input.string("Breakout", "Entry Mode", options = ["Breakout", "Aggressive"], group = gSig)
+needTrigger = input.bool(true, "Require Trigger Event", group = gSig)
+
+gTrade = "Trade Box"
+atrLen = input.int(14, "ATR Length", minval = 1, group = gTrade)
+stopX = input.float(1.5, "Stop Loss (x ATR)", minval = 0.2, step = 0.1, group = gTrade)
+rr = input.float(2.0, "Risk : Reward", minval = 0.5, step = 0.1, group = gTrade)
+maxTrades = input.int(1, "Max Trades Per Cycle", minval = 1, group = gTrade)
+maxBarsTrade = input.int(100, "Max Bars Per Trade", minval = 5, group = gTrade)
+showBox = input.bool(true, "Show Trade Box", group = gTrade)
+
+gShow = "Display"
+showClimax = input.bool(true, "Climax (SC / BC)", group = gShow)
+showAR = input.bool(true, "AR", group = gShow)
+showST = input.bool(true, "ST", group = gShow)
+showC = input.bool(true, "Spring / UT (Phase C)", group = gShow)
+showD = input.bool(true, "SOS / SOW (Phase D)", group = gShow)
+showLPS = input.bool(true, "LPS / LPSY", group = gShow)
+showE = input.bool(true, "Phase E Breakout", group = gShow)
+showRange = input.bool(true, "Range Lines", group = gShow)
+showPhases = input.bool(true, "Phase Vertical Lines", group = gShow)
+showDash = input.bool(true, "Dashboard", group = gShow)
+
+// ==================== CORE ====================
+atr = ta.atr(atrLen)
+atrLab = nz(atr, math.max(high - low, syminfo.mintick))
+hasVol = not na(volume) and volume > 0
+volMa = ta.sma(volume, volLen)
+rvol = volMa > 0 ? volume / volMa : na
+spread = high - low
+avgSpread = ta.sma(spread, spreadLen)
+wideBar = spread > avgSpread * wideX
+narrowBar = spread < avgSpread * narrowX
+barRange = math.max(spread, syminfo.mintick)
+closePos = (close - low) / barRange
+upBar = close > open
+downBar = close < open
+hiVol = hasVol and rvol >= climaxRVOL
+dryVol = hasVol and rvol <= dryRVOL
+priorHigh = ta.highest(high, pivotLen)[1]
+priorLow = ta.lowest(low, pivotLen)[1]
+
+// ==================== RAW EVENTS ====================
+scRaw = downBar and hiVol and wideBar and closePos > 0.5 and low <= priorLow
+bcRaw = upBar and hiVol and wideBar and closePos < 0.5 and high >= priorHigh
+
+// ==================== STATE ====================
+var int side = 0
+var int stage = 0
+var bool inRange = false
+var float rTop = na
+var float rBot = na
+var int rStart = na
+var bool reAccum = false
+var bool reDist = false
+var bool failedCycle = false
+var bool evClimax = false
+var bool evAR = false
+var bool evST = false
+var bool evC = false
+var bool evD = false
+var bool evLPS = false
+var bool evE = false
+var float climaxRVol = na
+var float arHigh = na
+var float arLow = na
+var int tradesThisCycle = 0
+var line topLine = na
+var line botLine = na
+
+// per-bar plot flags
+bool pClimax = false
+bool pAR = false
+bool pST = false
+bool pC = false
+bool pD = false
+bool pLPS = false
+bool pE = false
+bool pFailed = false
+
+// ==================== NEW CYCLE ====================
+rangeBusy = inRange and stage >= 1 and stage <= 3
+newAccum = scRaw and not rangeBusy
+newDist = bcRaw and not rangeBusy and not newAccum
+
+if newAccum
+    reAccum := side == 1 and stage >= 4
+    reDist := false
+    side := 1
+    stage := 1
+    inRange := true
+    rBot := low
+    rTop := high
+    rStart := bar_index
+    climaxRVol := nz(rvol)
+    arHigh := high
+    arLow := low
+    evClimax := true
+    evAR := false
+    evST := false
+    evC := false
+    evD := false
+    evLPS := false
+    evE := false
+    failedCycle := false
+    tradesThisCycle := 0
+    pClimax := true
+    if showRange
+        topLine := line.new(bar_index, rTop, bar_index, rTop, color = color.new(color.blue, 0), width = 2)
+        botLine := line.new(bar_index, rBot, bar_index, rBot, color = color.new(color.blue, 0), width = 2)
+    if showPhases
+        line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.gray, 45), style = line.style_dashed)
+        label.new(bar_index, high + atrLab * 2, "A", style = label.style_none, textcolor = color.new(color.gray, 0), size = size.small)
+
+if newDist
+    reDist := side == -1 and stage >= 4
+    reAccum := false
+    side := -1
+    stage := 1
+    inRange := true
+    rTop := high
+    rBot := low
+    rStart := bar_index
+    climaxRVol := nz(rvol)
+    arHigh := high
+    arLow := low
+    evClimax := true
+    evAR := false
+    evST := false
+    evC := false
+    evD := false
+    evLPS := false
+    evE := false
+    failedCycle := false
+    tradesThisCycle := 0
+    pClimax := true
+    if showRange
+        topLine := line.new(bar_index, rTop, bar_index, rTop, color = color.new(color.orange, 0), width = 2)
+        botLine := line.new(bar_index, rBot, bar_index, rBot, color = color.new(color.orange, 0), width = 2)
+    if showPhases
+        line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.gray, 45), style = line.style_dashed)
+        label.new(bar_index, high + atrLab * 2, "A", style = label.style_none, textcolor = color.new(color.gray, 0), size = size.small)
+
+// ==================== PHASE A -> B (AR) ====================
+if stage == 1 and inRange and bar_index > rStart + 1
+    if side == 1
+        rBot := math.min(rBot, low)
+        arHigh := na(arHigh) ? high : math.max(arHigh, high)
+        if high - rBot >= arMinX * atr
+            rTop := arHigh
+            evAR := true
+            stage := 2
+            pAR := true
+            if showPhases
+                line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.gray, 45), style = line.style_dashed)
+                label.new(bar_index, high + atrLab * 2, "B", style = label.style_none, textcolor = color.new(color.gray, 0), size = size.small)
+    else
+        rTop := math.max(rTop, high)
+        arLow := na(arLow) ? low : math.min(arLow, low)
+        if rTop - low >= arMinX * atr
+            rBot := arLow
+            evAR := true
+            stage := 2
+            pAR := true
+            if showPhases
+                line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.gray, 45), style = line.style_dashed)
+                label.new(bar_index, high + atrLab * 2, "B", style = label.style_none, textcolor = color.new(color.gray, 0), size = size.small)
+
+// ==================== PHASE B (ST) ====================
+if stage == 2 and inRange and not pAR and bar_index > rStart + 2
+    if side == 1
+        if not evST and low <= rBot + stTolX * atr and close > rBot and nz(rvol) < nz(climaxRVol) and (narrowBar or dryVol)
+            evST := true
+            pST := true
+    else
+        if not evST and high >= rTop - stTolX * atr and close < rTop and nz(rvol) < nz(climaxRVol) and (narrowBar or dryVol)
+            evST := true
+            pST := true
+
+// ==================== PHASE C (SPRING / UT) ====================
+if stage == 2 and inRange and not pAR and bar_index > rStart + 2
+    if side == 1 and low < rBot and close > rBot and closePos > 0.55
+        evC := true
+        stage := 3
+        pC := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.purple, 30), style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "C", style = label.style_none, textcolor = color.new(color.purple, 0), size = size.small)
+    if side == -1 and high > rTop and close < rTop and closePos < 0.45
+        evC := true
+        stage := 3
+        pC := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.purple, 30), style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "C", style = label.style_none, textcolor = color.new(color.purple, 0), size = size.small)
+
+// ==================== PHASE D (SOS / SOW) ====================
+if stage >= 2 and stage <= 3 and inRange
+    if side == 1 and close > rTop + brkBufX * atr and closePos > 0.65 and nz(rvol) >= sosRVOL
+        evD := true
+        stage := 4
+        pD := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.teal, 20), style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "D", style = label.style_none, textcolor = color.new(color.teal, 0), size = size.small)
+    if side == -1 and close < rBot - brkBufX * atr and closePos < 0.35 and nz(rvol) >= sosRVOL
+        evD := true
+        stage := 4
+        pD := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.teal, 20), style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "D", style = label.style_none, textcolor = color.new(color.teal, 0), size = size.small)
+
+// ==================== LPS / LPSY ====================
+if stage == 4 and inRange and not pD
+    if side == 1 and not evLPS and low <= rTop + stTolX * atr and close > rTop
+        evLPS := true
+        pLPS := true
+    if side == -1 and not evLPS and high >= rBot - stTolX * atr and close < rBot
+        evLPS := true
+        pLPS := true
+
+// ==================== PHASE E (MARKUP / MARKDOWN) ====================
+if stage >= 3 and inRange
+    if side == 1 and close > rTop + phaseEX * atr
+        evE := true
+        stage := 5
+        inRange := false
+        pE := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.green, 20), style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "E", style = label.style_none, textcolor = color.new(color.green, 0), size = size.small)
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_color(topLine, color.new(color.green, 40))
+            line.set_color(botLine, color.new(color.green, 40))
+    if side == -1 and close < rBot - phaseEX * atr
+        evE := true
+        stage := 5
+        inRange := false
+        pE := true
+        if showPhases
+            line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.green, 20), style = line.style_dashed)
+            label.new(bar_index, high + atrLab * 2, "E", style = label.style_none, textcolor = color.new(color.green, 0), size = size.small)
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_color(topLine, color.new(color.green, 40))
+            line.set_color(botLine, color.new(color.green, 40))
+
+// ==================== FAILED CYCLE ====================
+if inRange and stage >= 2 and stage <= 4
+    if side == 1 and close < rBot - phaseEX * atr
+        failedCycle := true
+        pFailed := true
+        inRange := false
+        stage := 0
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_color(topLine, color.new(color.red, 50))
+            line.set_color(botLine, color.new(color.red, 50))
+    if side == -1 and close > rTop + phaseEX * atr
+        failedCycle := true
+        pFailed := true
+        inRange := false
+        stage := 0
+        if showRange and not na(topLine) and not na(botLine)
+            line.set_color(topLine, color.new(color.red, 50))
+            line.set_color(botLine, color.new(color.red, 50))
+
+// ==================== RANGE TIMEOUT ====================
+if inRange and stage >= 1 and stage <= 3 and bar_index - rStart > maxRangeBars
+    inRange := false
+    stage := 0
+
+// ==================== SCORE / MISSING ====================
+score = (evClimax ? 1 : 0) + (evAR ? 1 : 0) + (evST ? 1 : 0) + (evC ? 1 : 0) + (evD ? 1 : 0) + (evLPS ? 1 : 0)
+missClimax = evClimax ? "" : "SC/BC "
+missAR = evAR ? "" : "AR "
+missST = evST ? "" : "ST "
+missC = evC ? "" : "C "
+missD = evD ? "" : "D "
+missLPS = evLPS ? "" : "LPS "
+missingTxt = score >= 6 ? "none" : missClimax + missAR + missST + missC + missD + missLPS
+
+// ==================== TRADE STATE ====================
+var bool tradeActive = false
+var int tradeDir = 0
+var float tradeEntry = na
+var float tradeSL = na
+var float tradeTP = na
+var int tradeBar = na
+var box tradeBox = na
+bool closedThisBar = false
+
+if tradeActive
+    hitTP = tradeDir == 1 ? high >= tradeTP : low <= tradeTP
+    hitSL = tradeDir == 1 ? low <= tradeSL : high >= tradeSL
+    timeout = bar_index - tradeBar >= maxBarsTrade
+    if hitTP or hitSL or timeout
+        win = hitTP and not hitSL
+        if showBox and not na(tradeBox)
+            box.set_right(tradeBox, bar_index)
+            box.set_bgcolor(tradeBox, win ? color.new(color.green, 70) : color.new(color.red, 70))
+            box.set_border_color(tradeBox, win ? color.green : color.red)
+            box.set_text(tradeBox, win ? "TP" : hitSL ? "SL" : "TIME")
+        tradeActive := false
+        tradesThisCycle := tradesThisCycle + 1
+        closedThisBar := true
+
+// ==================== SIGNALS ====================
+minStage = entryMode == "Breakout" ? 3 : 2
+longTrigBreak = ta.crossover(close, rTop + brkBufX * atr) or pLPS
+longTrigAggr = pC or pST or pLPS or pD
+longTrig = entryMode == "Breakout" ? longTrigBreak : longTrigAggr
+longRangeOK = inRange or pE
+longSignal = side == 1 and stage >= minStage and score >= minScore and longRangeOK and (needTrigger ? longTrig : true) and not tradeActive and not closedThisBar and tradesThisCycle < maxTrades and not failedCycle
+
+shortTrigBreak = ta.crossunder(close, rBot - brkBufX * atr) or pLPS
+shortTrigAggr = pC or pST or pLPS or pD
+shortTrig = entryMode == "Breakout" ? shortTrigBreak : shortTrigAggr
+shortRangeOK = inRange or pE
+shortSignal = side == -1 and stage >= minStage and score >= minScore and shortRangeOK and (needTrigger ? shortTrig : true) and not tradeActive and not closedThisBar and tradesThisCycle < maxTrades and not failedCycle
+
+if longSignal
+    tradeActive := true
+    tradeDir := 1
+    tradeEntry := close
+    tradeSL := close - stopX * atr
+    tradeTP := close + stopX * atr * rr
+    tradeBar := bar_index
+    if showBox
+        tradeBox := box.new(bar_index, tradeTP, bar_index, tradeSL, border_color = color.green, bgcolor = color.new(color.green, 85), border_width = 1, text = "LONG", text_color = color.white, text_size = size.tiny)
+
+if shortSignal
+    tradeActive := true
+    tradeDir := -1
+    tradeEntry := close
+    tradeSL := close + stopX * atr
+    tradeTP := close - stopX * atr * rr
+    tradeBar := bar_index
+    if showBox
+        tradeBox := box.new(bar_index, tradeSL, bar_index, tradeTP, border_color = color.red, bgcolor = color.new(color.red, 85), border_width = 1, text = "SHORT", text_color = color.white, text_size = size.tiny)
+
+if tradeActive and showBox and not na(tradeBox)
+    box.set_right(tradeBox, bar_index)
+
+// ==================== RANGE LINES ====================
+if inRange and showRange and not na(topLine) and not na(botLine)
+    line.set_xy1(topLine, rStart, rTop)
+    line.set_xy2(topLine, bar_index, rTop)
+    line.set_xy1(botLine, rStart, rBot)
+    line.set_xy2(botLine, bar_index, rBot)
+
+// ==================== EVENT MARKERS ====================
+plotshape(showClimax and pClimax and side == 1, "SC", shape.labelup, location.belowbar, color.new(color.green, 0), text = "SC", textcolor = color.white, size = size.tiny)
+plotshape(showClimax and pClimax and side == -1, "BC", shape.labeldown, location.abovebar, color.new(color.red, 0), text = "BC", textcolor = color.white, size = size.tiny)
+plotshape(showAR and pAR and side == 1, "AR", shape.triangleup, location.abovebar, color.new(color.gray, 0), text = "AR", textcolor = color.gray, size = size.tiny)
+plotshape(showAR and pAR and side == -1, "AR", shape.triangledown, location.belowbar, color.new(color.gray, 0), text = "AR", textcolor = color.gray, size = size.tiny)
+plotshape(showST and pST and side == 1, "ST", shape.circle, location.belowbar, color.new(color.teal, 0), text = "ST", textcolor = color.teal, size = size.tiny)
+plotshape(showST and pST and side == -1, "ST", shape.circle, location.abovebar, color.new(color.maroon, 0), text = "ST", textcolor = color.maroon, size = size.tiny)
+plotshape(showC and pC and side == 1, "SPRING", shape.diamond, location.belowbar, color.new(color.lime, 0), text = "SPR", textcolor = color.black, size = size.tiny)
+plotshape(showC and pC and side == -1, "UT", shape.diamond, location.abovebar, color.new(color.maroon, 0), text = "UT", textcolor = color.white, size = size.tiny)
+plotshape(showD and pD and side == 1, "SOS", shape.triangleup, location.belowbar, color.new(color.green, 0), text = "SOS", textcolor = color.green, size = size.tiny)
+plotshape(showD and pD and side == -1, "SOW", shape.triangledown, location.abovebar, color.new(color.red, 0), text = "SOW", textcolor = color.red, size = size.tiny)
+plotshape(showLPS and pLPS and side == 1, "LPS", shape.labelup, location.belowbar, color.new(color.teal, 0), text = "LPS", textcolor = color.white, size = size.tiny)
+plotshape(showLPS and pLPS and side == -1, "LPSY", shape.labeldown, location.abovebar, color.new(color.maroon, 0), text = "LPSY", textcolor = color.white, size = size.tiny)
+plotshape(showE and pE and side == 1, "PHASE E UP", shape.arrowup, location.belowbar, color.new(color.green, 0), text = "E", textcolor = color.green, size = size.tiny)
+plotshape(showE and pE and side == -1, "PHASE E DOWN", shape.arrowdown, location.abovebar, color.new(color.red, 0), text = "E", textcolor = color.red, size = size.tiny)
+
+bgcolor(longSignal ? color.new(color.green, 85) : shortSignal ? color.new(color.red, 85) : pFailed ? color.new(color.gray, 90) : na, title = "Signal BG")
+
+// ==================== DASHBOARD ====================
+sideCol = side == 1 ? color.lime : side == -1 ? color.red : color.gray
+cycleTxt = failedCycle ? "FAILED CYCLE" : side == 1 ? (stage == 5 ? "MARKUP" : reAccum ? "RE-ACCUMULATION" : "ACCUMULATION") : side == -1 ? (stage == 5 ? "MARKDOWN" : reDist ? "REDISTRIBUTION" : "DISTRIBUTION") : "none"
+phaseTxt = stage == 1 ? "A - Stopping" : stage == 2 ? "B - Building Cause" : stage == 3 ? "C - Test / Spring" : stage == 4 ? "D - Trend Test" : stage == 5 ? "E - Trend" : "none"
+scoreTxt = str.tostring(score) + " / 6"
+riskTxt = failedCycle ? "FAILED - HIGH" : score >= 5 ? "LOW" : score >= 3 ? "MEDIUM" : "HIGH"
+riskCol = failedCycle or score <= 2 ? color.red : score >= 5 ? color.green : color.orange
+tradeTxt = tradeActive ? (tradeDir == 1 ? "LONG " : "SHORT ") + str.tostring(tradeEntry, format.mintick) : "none (" + str.tostring(tradesThisCycle) + "/" + str.tostring(maxTrades) + ")"
+rangeTxt = inRange ? str.tostring(rTop, format.mintick) + " / " + str.tostring(rBot, format.mintick) : "none"
+
+var table dash = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, showDash ? 15 : 100), border_width = 1, border_color = color.new(color.gray, 70))
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "CYCLE", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 0, cycleTxt, text_color = sideCol, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 1, "PHASE", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 1, phaseTxt, text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 2, "SCORE", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 2, scoreTxt, text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 3, "MISSING", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 3, missingTxt, text_color = color.orange, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 4, "RISK", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 4, riskTxt, text_color = riskCol, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 5, "TRADE", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 5, tradeTxt, text_color = tradeActive ? (tradeDir == 1 ? color.lime : color.red) : color.gray, text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 0, 6, "RANGE", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 6, rangeTxt, text_color = color.white, text_size = size.small, text_halign = text.align_right)
+
+// ==================== ALERTS ====================
+alertcondition(longSignal, "Wyckoff Long", "Wyckoff LONG {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSignal, "Wyckoff Short", "Wyckoff SHORT {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pClimax and side == 1, "Selling Climax", "SC {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pClimax and side == -1, "Buying Climax", "BC {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pC, "Spring / UT", "Phase C event {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pD, "SOS / SOW", "Phase D event {{ticker}} {{interval}} @ {{close}}")
+alertcondition(pE, "Phase E", "Phase E breakout {{ticker}} {{interval}} @ {{close}}")

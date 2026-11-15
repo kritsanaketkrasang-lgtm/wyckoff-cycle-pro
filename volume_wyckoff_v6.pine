@@ -1,0 +1,117 @@
+//@version=6
+indicator("Volume MA + Wyckoff Signals", shorttitle = "Vol/Wyckoff", overlay = false, max_labels_count = 500)
+
+// ==================== INPUTS ====================
+gVol = "Volume"
+volLen  = input.int(20, "Volume MA Length", minval = 1, group = gVol)
+rvolHi  = input.float(2.0, "Climax Volume (x MA)", minval = 1.0, step = 0.1, group = gVol)
+rvolDry = input.float(0.6, "Dry-Up Volume (x MA)", maxval = 1.0, step = 0.1, group = gVol)
+sosVol  = input.float(1.5, "SOS/SOW Volume (x MA)", minval = 1.0, step = 0.1, group = gVol)
+
+gWyc = "Wyckoff Structure"
+spreadLen  = input.int(20, "Average Spread Length", minval = 1, group = gWyc)
+wideMult   = input.float(1.5, "Wide Spread (x avg)", minval = 1.0, step = 0.1, group = gWyc)
+narrowMult = input.float(0.7, "Narrow Spread (x avg)", maxval = 1.0, step = 0.1, group = gWyc)
+brkLen     = input.int(20, "Structure Lookback (breakouts / sweeps)", minval = 2, group = gWyc)
+
+gSess = "Session Filter"
+useSess = input.bool(false, "Filter by session", group = gSess)
+sessStr = input.session("0930-1600", "Session", group = gSess)
+
+gShow = "Display"
+showClimax = input.bool(true, "Climax (SC / BC)", group = gShow)
+showSOS    = input.bool(true, "SOS / SOW", group = gShow)
+showND     = input.bool(true, "No Demand / No Supply", group = gShow)
+showSweep  = input.bool(true, "Spring / Upthrust", group = gShow)
+showAbs    = input.bool(true, "Absorption", group = gShow)
+showBg     = input.bool(true, "Highlight climax bars", group = gShow)
+showTable  = input.bool(true, "Info table", group = gShow)
+
+// ==================== CORE ====================
+hasVol = not na(volume) and volume > 0
+
+volMa = ta.sma(volume, volLen)
+rvol  = volMa > 0 ? volume / volMa : na
+
+spread    = high - low
+avgSpread = ta.sma(spread, spreadLen)
+wideBar   = spread > avgSpread * wideMult
+narrowBar = spread < avgSpread * narrowMult
+
+barRange = math.max(spread, syminfo.mintick)
+closePos = (close - low) / barRange
+
+upBar   = close > open
+downBar = close < open
+
+hiVol  = hasVol and rvol >= rvolHi
+dryVol = hasVol and rvol <= rvolDry
+
+priorHigh = ta.highest(high, brkLen)[1]
+priorLow  = ta.lowest(low, brkLen)[1]
+
+inSession = not useSess or not na(time(timeframe.period, sessStr))
+
+// ==================== WYCKOFF EVENTS ====================
+sellClimax = inSession and downBar and hiVol and wideBar and closePos > 0.55 and low  <= priorLow
+buyClimax  = inSession and upBar   and hiVol and wideBar and closePos < 0.45 and high >= priorHigh
+
+absorption = inSession and hiVol and narrowBar
+
+noDemand = inSession and upBar   and dryVol and narrowBar and closePos < 0.5
+noSupply = inSession and downBar and dryVol and narrowBar and closePos > 0.5
+
+sos = inSession and close > priorHigh and wideBar and closePos > 0.70 and rvol >= sosVol
+sow = inSession and close < priorLow  and wideBar and closePos < 0.30 and rvol >= sosVol
+
+spring   = inSession and low  < priorLow  and close > priorLow  and closePos > 0.60
+upthrust = inSession and high > priorHigh and close < priorHigh and closePos < 0.40
+
+// ==================== PLOTS ====================
+volColor = hiVol ? color.new(color.orange, 0) : dryVol ? color.new(color.gray, 30) : upBar ? color.new(color.green, 45) : color.new(color.red, 45)
+
+plot(volume, "Volume", style = plot.style_columns, color = volColor)
+plot(volMa, "Volume MA", color = color.new(color.yellow, 0), linewidth = 2)
+
+bgcolor(showBg and (sellClimax or buyClimax) ? color.new(color.orange, 88) : na, title = "Climax BG")
+
+plotshape(showClimax and sellClimax, "Selling Climax", shape.labelup,    location.belowbar, color.new(color.green, 0),  text = "SC",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(showClimax and buyClimax,  "Buying Climax",  shape.labeldown,  location.abovebar, color.new(color.red, 0),    text = "BC",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(showSOS and sos,           "Sign of Strength", shape.triangleup,   location.belowbar, color.new(color.green, 0),  text = "SOS", size = size.tiny, force_overlay = true)
+plotshape(showSOS and sow,           "Sign of Weakness", shape.triangledown, location.abovebar, color.new(color.red, 0),    text = "SOW", size = size.tiny, force_overlay = true)
+plotshape(showND and noDemand,       "No Demand",      shape.xcross,     location.abovebar, color.new(color.orange, 0), text = "ND",  size = size.tiny, force_overlay = true)
+plotshape(showND and noSupply,       "No Supply",      shape.xcross,     location.belowbar, color.new(color.teal, 0),   text = "NS",  size = size.tiny, force_overlay = true)
+plotshape(showSweep and spring,      "Spring",         shape.diamond,    location.belowbar, color.new(color.lime, 0),   text = "SPR", size = size.tiny, force_overlay = true)
+plotshape(showSweep and upthrust,    "Upthrust",       shape.diamond,    location.abovebar, color.new(color.maroon, 0), text = "UT",  size = size.tiny, force_overlay = true)
+plotshape(showAbs and absorption,    "Absorption",     shape.circle,     location.belowbar, color.new(color.orange, 0), text = "ABS", size = size.tiny, force_overlay = true)
+
+// ==================== INFO TABLE (flat, no local block) ====================
+var table info = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, showTable ? 20 : 100), border_width = showTable ? 1 : 0)
+spreadRatio = avgSpread > 0 ? spread / avgSpread : 0.0
+isAboveAvg  = nz(rvol) > 1
+stateTxt    = hiVol ? "CLIMAX" : dryVol ? "DRY-UP" : isAboveAvg ? "ABOVE AVG" : "NORMAL"
+stateCol    = hiVol ? color.orange : dryVol ? color.gray : color.white
+table.cell(info, 0, 0, showTable ? "RVOL" : "", text_color = color.gray, text_size = size.small)
+table.cell(info, 1, 0, showTable ? str.tostring(nz(rvol), "#.##") + "x" : "", text_color = stateCol, text_size = size.small)
+table.cell(info, 0, 1, showTable ? "Vol MA" : "", text_color = color.gray, text_size = size.small)
+table.cell(info, 1, 1, showTable ? str.tostring(nz(volMa), format.volume) : "", text_color = color.white, text_size = size.small)
+table.cell(info, 0, 2, showTable ? "Spread" : "", text_color = color.gray, text_size = size.small)
+table.cell(info, 1, 2, showTable ? str.tostring(spreadRatio, "#.##") + "x avg" : "", text_color = color.white, text_size = size.small)
+table.cell(info, 0, 3, showTable ? "State" : "", text_color = color.gray, text_size = size.small)
+table.cell(info, 1, 3, showTable ? stateTxt : "", text_color = stateCol, text_size = size.small)
+
+// ==================== ALERTS ====================
+alertcondition(sellClimax, "Selling Climax", "SC {{ticker}} {{interval}} - high-volume down bar closing off the low")
+alertcondition(buyClimax,  "Buying Climax",  "BC {{ticker}} {{interval}} - high-volume up bar closing off the high")
+alertcondition(sos,        "Sign of Strength", "SOS {{ticker}} {{interval}} - breakout on wide spread + volume")
+alertcondition(sow,        "Sign of Weakness", "SOW {{ticker}} {{interval}} - breakdown on wide spread + volume")
+alertcondition(spring,     "Spring",         "SPRING {{ticker}} {{interval}} - sweep of lows and reclaim")
+alertcondition(upthrust,   "Upthrust",       "UT {{ticker}} {{interval}} - sweep of highs and rejection")
+alertcondition(noDemand,   "No Demand",      "ND {{ticker}} {{interval}} - up bar on low volume, weak close")
+alertcondition(noSupply,   "No Supply",      "NS {{ticker}} {{interval}} - down bar on low volume, strong close")
+alertcondition(absorption, "Absorption",     "ABS {{ticker}} {{interval}} - heavy volume, narrow spread")
+
+bullish = sellClimax or spring or sos or noSupply
+bearish = buyClimax or upthrust or sow or noDemand
+alertcondition(bullish, "Bullish Wyckoff Combo", "Bullish Wyckoff setup {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bearish, "Bearish Wyckoff Combo", "Bearish Wyckoff setup {{ticker}} {{interval}} @ {{close}}")
